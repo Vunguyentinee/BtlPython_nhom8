@@ -3,27 +3,12 @@ import os
 import numpy as np
 import time
 import json
-import mysql.connector
 from datetime import datetime
 from pathlib import Path
 import re
 import sys
 
-ROOT = Path(r"E:\BTL_Python")
-
-# ===================== CONFIG =====================
-DB_CONFIG = {
-    "host": "127.0.0.1",
-    "user": "root",
-    "password": "21092005",
-    "database": "dulieu_app",
-    "port": 3306,
-    "autocommit": True,
-}
-
-# ===================== MYSQL HELPER =====================
-def db_conn():
-    return mysql.connector.connect(**DB_CONFIG)
+from config import ROOT, DB_CONFIG, db_conn, safe_slug
 
 def insert_employee(ma_nv, ten, phongban, chucvu, email, sdt):
     """Chèn nhân viên mới nếu chưa có"""
@@ -40,10 +25,6 @@ def insert_employee(ma_nv, ten, phongban, chucvu, email, sdt):
             else:
                 cur.execute(sql_insert, (ma_nv, ten, phongban, chucvu, email, sdt))
                 print(f"✅ Đã thêm nhân viên mới: {ten} ({ma_nv})")
-
-def safe_slug(s: str) -> str:
-    bad = '<>:"/\\|?*'
-    return "".join(c for c in s if c not in bad).strip().rstrip(".")
 
 # ===================== FACE COLLECTOR =====================
 class FaceCollector:
@@ -63,7 +44,7 @@ class FaceCollector:
         self.DELAY = capture_delay
         self.BLUR_THRESHOLD = blur_threshold
         self.PREVIEW_SIZE = preview_size
-        self.SAVE_ROOT = Path(save_root)
+        self.SAVE_ROOT = Path(save_root or ROOT / "dataset")
         if not self.SAVE_ROOT.is_absolute():
             # ép relative -> tuyệt đối theo file capture_face
             base = Path(__file__).resolve().parent

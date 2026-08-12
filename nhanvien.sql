@@ -1,3 +1,4 @@
+CREATE DATABASE IF NOT EXISTS dulieu_app;
 USE dulieu_app;
 
 CREATE TABLE nhanvien (

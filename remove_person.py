@@ -4,33 +4,10 @@ import shutil
 from pathlib import Path
 import mysql.connector
 
+from config import ROOT, ENCODINGS_PKL as OUT_PKL, DATASET as DATASET_ROOT, DB_CONFIG, db_conn, split_name_id
+
 # ========== CẤU HÌNH ==========
-ROOT = Path(r"E:\BTL_Python")
-OUT_PKL = ROOT / "encodings" / "encodings_dlib20.pkl"
-DATASET_ROOT = ROOT / "dataset"     # thư mục ảnh
 ALSO_DELETE_DATASET = True          # đặt False nếu không muốn xóa ảnh
-
-DB_CONFIG = {
-    "host": "127.0.0.1",
-    "user": "root",
-    "password": "21092005",
-    "database": "dulieu_app",
-    "port": 3306,
-    "autocommit": True,
-}
-
-# ========== TIỆN ÍCH ==========
-def split_name_id(s: str):
-    """Trả về (ten, ma_nv). Nếu input chỉ là mã NV thì (None, ma)."""
-    s = s.strip()
-    if "_" in s:
-        a, b = s.rsplit("_", 1)
-        return a.strip(), b.strip()
-    # Không có "_" => coi như nhập mã NV
-    return None, s
-
-def db_conn():
-    return mysql.connector.connect(**DB_CONFIG)
 
 # ========== ENCODINGS ==========
 def remove_from_encodings(person_name_or_id: str) -> int:
@@ -149,6 +126,16 @@ if __name__ == "__main__":
     person = input("👤 Nhập 'Tên_MãNV' hoặc chỉ 'MãNV' cần xoá: ").strip()
     if not person:
         print("❌ Thiếu đầu vào.")
+        raise SystemExit
+
+    print("\n⚠️ CẢNH BÁO: Thao tác này sẽ XÓA VĨNH VIỄN và KHÔNG THỂ HOÀN TÁC:")
+    print(f"   - Vector khuôn mặt của '{person}' trong file encodings")
+    print(f"   - Bản ghi nhân viên '{person}' trong DB (kèm toàn bộ lịch sử chấm công)")
+    if ALSO_DELETE_DATASET:
+        print(f"   - Toàn bộ ảnh dataset (raw/processed) của '{person}'")
+    confirm = input(f"\nGõ lại chính xác '{person}' để xác nhận xóa (Enter để hủy): ").strip()
+    if confirm != person:
+        print("❌ Đã hủy thao tác xóa.")
         raise SystemExit
 
     # 1) Xóa khỏi encodings

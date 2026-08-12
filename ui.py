@@ -8,7 +8,6 @@ import subprocess,sys
 import threading
 import mysql.connector
 import hashlib
-import unicodedata, re
 from remove_person import (
     remove_from_encodings,
     delete_employee_in_db,
@@ -17,19 +16,7 @@ from remove_person import (
 from capture_face import insert_employee,FaceCollector
 from pathlib import Path
 
-ROOT = Path(r"E:\BTL_Python")
-
-DB_CONFIG = {
-    "host": "127.0.0.1",
-    "user": "root",
-    "password": "21092005",
-    "database": "dulieu_app",
-    "port": 3306,
-    "autocommit": True,
-}
-
-def db_conn():
-    return mysql.connector.connect(**DB_CONFIG)
+from config import ROOT, DB_CONFIG, db_conn, safe_slug
 '''
 def insert_employee_db(ma_nv, ten, phongban, chucvu, email, sdt):
     sql_check = "SELECT 1 FROM nhanvien WHERE ma_nv=%s LIMIT 1"
@@ -97,14 +84,6 @@ def update_password(username: str, new_raw_password: str) -> bool:
         cur.execute(sql, (hash_pw(new_raw_password), username))
         return cur.rowcount > 0
 
-def safe_slug(s: str) -> str:
-    # bỏ dấu -> ASCII
-    s = unicodedata.normalize('NFKD', s).encode('ascii', 'ignore').decode('ascii')
-    # chỉ giữ [A-Za-z0-9._-]
-    s = re.sub(r'[^A-Za-z0-9._-]+', '_', s).strip('_')
-    return s
-
-
 # --------------------
 # Config (soft blue)
 # --------------------
@@ -113,9 +92,6 @@ PRIMARY_DARK = "#2563eb"
 BG = "#f6f9ff"
 CARD = "#ffffff"
 SUBTEXT = "#50616a"
-
-DATA_FILE = "admin_account.txt"   # ✅ Lưu tài khoản Admin (demo)
-
 
 
 # ---------- App ----------
@@ -168,37 +144,9 @@ class LoginWindow(tk.Tk):
         style.configure("Accent.TButton", background=PRIMARY, foreground="white", padding=8)
         style.map("Accent.TButton", background=[("active", PRIMARY_DARK)])
 
-    def _read_account(self):
-        # Nếu chưa có file hoặc file rỗng -> không có tài khoản
-        if not os.path.exists(DATA_FILE) or os.path.getsize(DATA_FILE) == 0:
-            return None, None
-
-        try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                data = f.read().strip().split("|")
-
-                # đúng định dạng: fullname|emp_id|username|password
-                if len(data) == 4:
-                    return data[2], data[3]   # username, password
-
-        except:
-            pass
-
-        return None, None
-
-
-
     def _on_login(self):
         user = self.username.get().strip()
         pwd = self.password.get().strip()
-
-        if user == "admin" and pwd == "admin123":
-            messagebox.showinfo("Thành công", f"Xin chào {user}!")
-            Dashboard(self, role="Admin", username=user)
-            self.withdraw()
-            return
-
-        stored_user, stored_pwd = self._read_account()
 
         if not user or not pwd:
             messagebox.showwarning("Thiếu thông tin", "Vui lòng nhập tên đăng nhập và mật khẩu.")
@@ -524,12 +472,12 @@ class Dashboard(tk.Toplevel):
         # nút mở camera nhận diện
         ttk.Button(topbar, text="Check-in FaceID", command=self.start_faceid).pack(side="right", padx=6)
 
-        # Bảng hiển thị: Thời gian vào / Mã NV / Họ tên / Ghi chú
-        cols = ("Thời gian vào", "Mã NV", "Họ tên", "Ghi chú")
+        # Bảng hiển thị: Mã NV / Họ tên / Ngày / Giờ Check-in / Giờ Check-out / Ghi chú
+        cols = ("Mã NV", "Họ tên", "Ngày", "Giờ Check-in", "Giờ Check-out", "Ghi chú")
         self.tree_att = ttk.Treeview(card, columns=cols, show="headings")
         for c in cols:
             self.tree_att.heading(c, text=c)
-            self.tree_att.column(c, width=200 if c == "Họ tên" else 160 if c == "Thời gian vào" else 120, anchor="w")
+            self.tree_att.column(c, width=150 if c in ("Họ tên", "Ngày") else 120, anchor="w")
         self.tree_att.pack(fill="both", expand=True, pady=(6,0))
 
         self.refresh_attendance()
@@ -541,14 +489,15 @@ class Dashboard(tk.Toplevel):
                 with conn.cursor() as cur:
                     cur.execute("""
                     SELECT 
-                        CONCAT(DATE_FORMAT(ngay, '%Y-%m-%d'), ' ', 
-                               IFNULL(DATE_FORMAT(gio_checkin, '%H:%i:%s'), ''))  AS thoi_gian_vao,
                         ma_nv,
                         ten_nv,
+                        DATE_FORMAT(ngay, '%Y-%m-%d') AS ngay,
+                        IFNULL(TIME_FORMAT(gio_checkin, '%H:%i:%s'), '') AS gio_checkin,
+                        IFNULL(TIME_FORMAT(gio_checkout, '%H:%i:%s'), '') AS gio_checkout,
                         IFNULL(ghichu,'') AS ghichu
                     FROM chamcong
                     WHERE ngay = CURDATE()
-                    ORDER BY gio_checkin
+                    ORDER BY gio_checkin ASC
                 """)
                     rows = cur.fetchall()
         except Exception as e:
@@ -784,7 +733,10 @@ class Dashboard(tk.Toplevel):
 
         # 3) Xóa ENCODINGS + DB + DATASET (dùng module remove_person.py)
             try:
-                label_full = f"{name_val}_{id_val}"        # Tên_MãNV đúng chuẩn encodings
+                # Thư mục dataset & label trong encodings được tạo bằng safe_slug
+                # (xem _start_capture_and_encode) — phải slug lại y hệt ở đây,
+                # nếu không thư mục ảnh và vector cũ sẽ không bao giờ bị xóa.
+                label_full = safe_slug(f"{name_val}_{id_val}")
             # encodings: thử xóa theo full label trước, nếu không có thì theo mã
                 enc_removed = remove_from_encodings(label_full)
                 if enc_removed == 0:
@@ -793,8 +745,9 @@ class Dashboard(tk.Toplevel):
             # DB: hàm của bạn chấp nhận cả "Tên_MãNV" hoặc chỉ "MãNV"
                 delete_employee_in_db(label_full)
 
-            # dataset folder: xóa chính xác thư mục ảnh
-                delete_dataset_folder(label_full)
+            # dataset folder: xóa chính xác thư mục ảnh (fallback theo mã nếu tên lệch)
+                if not delete_dataset_folder(label_full):
+                    delete_dataset_folder(id_val)
 
                 messagebox.showinfo("Thành công", f"Đã xóa '{name_val} ({id_val})' khỏi UI, encodings, DB và dataset.")
                 dlg.destroy()

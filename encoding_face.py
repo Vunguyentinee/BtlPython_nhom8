@@ -5,33 +5,20 @@ import sys, pickle
 import numpy as np
 import cv2, dlib
 
-# ===== CONFIG =====
-ROOT    = Path(r"E:\BTL_Python")           # chỉnh nếu bạn để dự án chỗ khác
-DATASET = ROOT / "dataset"                   # dataset/<ten>/raw/*.jpg
-OUT_PKL = ROOT / "encodings" / "encodings_dlib20.pkl"
-
-# Models nằm trong thư mục models/
-MODELS          = ROOT / "models"
-PREDICTOR_PATH  = MODELS / "shape_predictor_5_face_landmarks.dat"
-RECOG_MODEL_PATH= MODELS / "dlib_face_recognition_resnet_model_v1.dat"
-CNN_PATH        = MODELS / "mmod_human_face_detector.dat"   # tùy chọn
+from config import ROOT, DATASET, ENCODINGS_PKL as OUT_PKL, MODELS_DIR as MODELS, PREDICTOR_PATH, RECOG_MODEL_PATH, CNN_PATH
 
 def require_file(p: Path, hint: str):
     if not p.exists():
         print(f"❌ Missing: {p}\n👉 {hint}")
         sys.exit(1)
 
-require_file(PREDICTOR_PATH,  "Đặt shape_predictor_5_face_landmarks.dat vào E:\\BTL_Python\\models\\")
-require_file(RECOG_MODEL_PATH,"Đặt dlib_face_recognition_resnet_model_v1.dat vào E:\\BTL_Python\\models\\")
+require_file(PREDICTOR_PATH,  f"Đặt shape_predictor_5_face_landmarks.dat vào {MODELS}\\")
+require_file(RECOG_MODEL_PATH, f"Đặt dlib_face_recognition_resnet_model_v1.dat vào {MODELS}\\")
 
 # ===== INIT DLIB =====
-USE_CNN = CNN_PATH.exists()
-if USE_CNN:
-    _cnn = dlib.cnn_face_detection_model_v1(str(CNN_PATH))
-    def detect_rects(rgb): return [d.rect for d in _cnn(rgb, 1)]
-else:
-    _hog = dlib.get_frontal_face_detector()
-    def detect_rects(rgb): return _hog(rgb, 1)
+USE_CNN = False  # Ép buộc dùng HOG trên CPU để tối ưu hóa tốc độ (CNN cực chậm trên CPU)
+_hog = dlib.get_frontal_face_detector()
+def detect_rects(rgb): return _hog(rgb, 0) # Sử dụng upsampling = 0 để tối ưu tốc độ tối đa
 
 PRED = dlib.shape_predictor(str(PREDICTOR_PATH))
 REC  = dlib.face_recognition_model_v1(str(RECOG_MODEL_PATH))

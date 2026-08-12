@@ -9,23 +9,13 @@ import dlib
 import threading
 import time
 import mysql.connector
-from datetime import datetime, date, time as dtime
+import unicodedata
+from datetime import datetime, date, time as dtime, timedelta
 from collections import defaultdict, deque
 from pathlib import Path
 from encoding_loaded import load_all_encodings
 
-# =============== CẤU HÌNH ===============
-DB_CONFIG = {
-    "host": "127.0.0.1",      # 🔧 CÓ THỂ CẦN ĐỔI
-    "user": "root",           # 🔧 CÓ THỂ CẦN ĐỔI
-    "password": "21092005",     # 🔧 CÓ THỂ CẦN ĐỔI
-    "database": "dulieu_app", # 🔧 CÓ THỂ CẦN ĐỔI
-    "port": 3306,
-    "autocommit": True,
-}
-
-def db_conn():
-    return mysql.connector.connect(**DB_CONFIG)
+from config import ROOT, MODELS_DIR, PREDICTOR_PATH, RECOG_MODEL_PATH, CNN_PATH, DB_CONFIG, db_conn, split_name_id as _split_name_id
 
 TOLERANCE = 0.5
 TOLERANCE2 = TOLERANCE * TOLERANCE
@@ -37,13 +27,6 @@ DETECT_SCALE = 0.4
 USE_CNN = False
 
 ON_TIME = dtime(8, 0, 0)  # mốc 8h để tính ghi chú
-
-# Model paths
-ROOT = Path(__file__).resolve().parent
-MODELS_DIR = ROOT / "models"
-PREDICTOR_PATH = MODELS_DIR / "shape_predictor_5_face_landmarks.dat"
-RECOG_MODEL_PATH = MODELS_DIR / "dlib_face_recognition_resnet_model_v1.dat"
-CNN_PATH = MODELS_DIR / "mmod_human_face_detector.dat"
 
 # =============== DLIB INIT ===============
 def _require(p: Path, hint: str):
@@ -58,20 +41,22 @@ _cnn = dlib.cnn_face_detection_model_v1(str(CNN_PATH)) if USE_CNN and CNN_PATH.e
 PRED = dlib.shape_predictor(str(PREDICTOR_PATH))
 REC  = dlib.face_recognition_model_v1(str(RECOG_MODEL_PATH))
 
-# =============== DB HELPER ===============
-def db_conn():
-    return mysql.connector.connect(**DB_CONFIG)
-
 # =============== TÁCH TÊN & MÃ NV ===============
 def split_name_id(full_name: str):
     """
     Chuẩn label ảnh: 'TenNhanVien_maNV'
     Ví dụ: 'Nguyen Van A_nv01' -> ('Nguyen Van A', 'nv01')
+    Nhãn không đúng định dạng (thiếu '_') => ma rỗng để báo lỗi ở nơi gọi.
     """
-    parts = full_name.rsplit("_", 1)  # 🔧 CÓ THỂ CẦN ĐỔI nếu bạn đặt tên khác format
-    if len(parts) == 2:
-        return parts[0].strip(), parts[1].strip()
-    return full_name.strip(), ""
+    ten, ma = _split_name_id(full_name)
+    if ten is None:
+        return full_name.strip(), ""
+    return ten, ma
+
+def remove_accents(input_str: str) -> str:
+    """Loại bỏ dấu tiếng Việt để tránh lỗi hiển thị font cv2.putText"""
+    nfkd_form = unicodedata.normalize('NFKD', input_str)
+    return "".join([c for c in nfkd_form if not unicodedata.combining(c)])
 
 # =============== TIỆN ÍCH THỜI GIAN ===============
 def today_date() -> date:
@@ -250,8 +235,84 @@ class CameraReader:
         time.sleep(0.05)
         self.cap.release()
 
+# =============== ASYNC RECOGNITION WORKER ===============
+is_recognizing = False
+status_banner_text = ""
+status_banner_expiry = datetime.min
+boxes_cache_shared = []
+
+def process_recognition_async(rgb_copy, rects, known_encodings, known_names, last_action_time):
+    global is_recognizing, status_banner_text, status_banner_expiry, boxes_cache_shared
+    try:
+        temp_cache = []
+        for rect in rects:
+            l, t, rgt, btm = rect.left(), rect.top(), rect.right(), rect.bottom()
+            if l < 0 or t < 0 or rgt <= l or btm <= t:
+                continue
+
+            vec = _encode_one_rgb(rgb_copy, rect)
+            if vec is None:
+                temp_cache.append((rect, "Unknown", (0, 0, 255)))
+                continue
+
+            diff = known_encodings - vec
+            d2 = np.einsum('ij,ij->i', diff, diff)
+            min_idx = int(np.argmin(d2)) if d2.size else None
+
+            name = "Unknown"
+            color = (0, 0, 255)
+
+            if min_idx is not None and d2[min_idx] <= TOLERANCE2:
+                name = str(known_names[min_idx])
+                color = (0, 255, 0)
+
+                now = datetime.now()
+                if (now - last_action_time[name]).total_seconds() >= 60:
+                    ten, ma = split_name_id(name)
+                    ten_ascii = remove_accents(ten)
+
+                    row = get_today_row(ma)
+                    if row is None or not row.get("gio_checkin"):
+                        msg = check_in(name)
+                        status_banner_text = f"[{ten_ascii.upper()}] - CHECK-IN THANH CONG"
+                        status_banner_expiry = now + timedelta(seconds=3)
+                    elif not row.get("gio_checkout"):
+                        # Ràng buộc checkout tối thiểu phải sau checkin 5 phút (300 giây)
+                        gio_checkin = row.get("gio_checkin")
+                        if gio_checkin:
+                            time_diff = (now - gio_checkin).total_seconds()
+                            if time_diff < 300:
+                                rem = int(300 - time_diff)
+                                rem_m, rem_s = rem // 60, rem % 60
+                                status_banner_text = f"[{ten_ascii.upper()}] - CHECK-OUT SAU {rem_m}m {rem_s}s"
+                                status_banner_expiry = now + timedelta(seconds=3)
+                                print(f"⚠️ {name} checkout qua som. Vui long doi {rem_m} phut {rem_s} giay.")
+                                last_action_time[name] = now
+                                temp_cache.append((rect, name, color))
+                                continue
+
+                        msg = check_out(name)
+                        status_banner_text = f"[{ten_ascii.upper()}] - CHECK-OUT THANH CONG"
+                        status_banner_expiry = now + timedelta(seconds=3)
+                    else:
+                        msg = f"DA CHECK-IN & OUT HOM NAY"
+                        status_banner_text = f"[{ten_ascii.upper()}] - {msg}"
+                        status_banner_expiry = now + timedelta(seconds=3)
+                    print(msg)
+                    last_action_time[name] = now
+
+            temp_cache.append((rect, name, color))
+
+        boxes_cache_shared = temp_cache
+    except Exception as e:
+        print(f"❌ Lỗi trong luồng nhận diện: {e}")
+    finally:
+        is_recognizing = False
+
 # =============== MAIN LOOP ===============
 def main():
+    global is_recognizing, status_banner_text, status_banner_expiry, boxes_cache_shared
+
     known_encodings, known_names = load_all_encodings()
     if not isinstance(known_encodings, np.ndarray):
         known_encodings = np.array(known_encodings, dtype=np.float32)
@@ -269,7 +330,7 @@ def main():
     print("🎥 Camera sẵn sàng. Auto check-in/out (mỗi người ≥60s/lần). Nhấn [q] để thoát.")
     last_action_time = defaultdict(lambda: datetime.min)
     i = 0
-    boxes_cache = []
+    current_rects = []
 
     while True:
         frame = cam.read()
@@ -280,55 +341,76 @@ def main():
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
         if i % PROCESS_EVERY == 0:
-            rects = _detect_rects_small(rgb)
-            boxes_cache = []
-            for rect in rects:
-                l, t, rgt, btm = rect.left(), rect.top(), rect.right(), rect.bottom()
-                if l < 0 or t < 0 or rgt <= l or btm <= t:
-                    continue
+            current_rects = _detect_rects_small(rgb)
 
-                vec = _encode_one_rgb(rgb, rect)
-                diff = known_encodings - vec
-                d2 = np.einsum('ij,ij->i', diff, diff)
-                min_idx = int(np.argmin(d2)) if d2.size else None
+            # Nếu có mặt và luồng phụ đã rảnh, bắt đầu luồng nhận diện mới
+            if not is_recognizing and current_rects:
+                is_recognizing = True
+                rgb_copy = rgb.copy()
+                t = threading.Thread(
+                    target=process_recognition_async,
+                    args=(rgb_copy, list(current_rects), known_encodings, known_names, last_action_time),
+                    daemon=True
+                )
+                t.start()
 
-                name = "Unknown"
-                color = (0, 0, 255)
+        now = datetime.now()
 
-                if min_idx is not None and d2[min_idx] <= TOLERANCE2:
-                    name = str(known_names[min_idx])
-                    color = (0, 255, 0)
-
-                    now = datetime.now()
-                    if (now - last_action_time[name]).total_seconds() >= 60:
-                        ten, ma = split_name_id(name)
-                        msg = None
-                        row = get_today_row(ma)
-                        if row is None or not row.get("gio_checkin"):
-                            msg = check_in(name)
-                        elif not row.get("gio_checkout"):
-                            msg = check_out(name)
-                        else:
-                            msg = f"ℹ️ {name} đã check-in & check-out hôm nay."
-                        print(msg)
-                        last_action_time[name] = now
-
-                boxes_cache.append((rect, name, color))
-
-        # Vẽ khung & nhãn
-        for rect, name, color in boxes_cache:
+        # Vẽ các khuôn mặt hiện tại thu được ở tốc độ mượt 30 FPS
+        for rect in current_rects:
             l, t, rgt, btm = rect.left(), rect.top(), rect.right(), rect.bottom()
-            cv2.rectangle(frame, (l, t), (rgt, btm), color, 2)
-            if name != "Unknown":
-                ten, ma = split_name_id(name)
-                label = f"{ten} ({ma})" if ma else ten
-            else:
-                label = name
-            cv2.putText(frame, label, (l, t - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
-        h, w = frame.shape[:2]
+            # Mặc định đang quét
+            label = "Scanning..."
+            color = (255, 191, 0) # Màu vàng hổ phách (BGR: 0, 191, 255) -> 255, 191, 0 (Cyan/Amber)
+
+            # Thử so sánh xem có nằm trong vùng tọa độ các mặt đã nhận diện từ luồng phụ không
+            # Lấy khung GẦN NHẤT trong ngưỡng (không phải khung đầu tiên) để tránh
+            # gán nhầm tên khi hai người đứng gần nhau.
+            matched_name = None
+            best_dist = None
+            c1 = ((rect.left() + rect.right()) // 2, (rect.top() + rect.bottom()) // 2)
+            for r_rect, r_name, r_color in list(boxes_cache_shared):
+                c2 = ((r_rect.left() + r_rect.right()) // 2, (r_rect.top() + r_rect.bottom()) // 2)
+                dist = np.sqrt((c1[0] - c2[0]) ** 2 + (c1[1] - c2[1]) ** 2)
+                if dist < 60 and (best_dist is None or dist < best_dist):
+                    best_dist = dist
+                    matched_name = r_name
+
+            if matched_name:
+                if matched_name != "Unknown":
+                    ten, ma = split_name_id(matched_name)
+                    ten_ascii = remove_accents(ten)
+                    label = f"{ten_ascii} ({ma})" if ma else ten_ascii
+                    color = (0, 255, 0)
+                else:
+                    label = "Unknown"
+                    color = (0, 0, 255)
+
+            cv2.rectangle(frame, (l, t), (rgt, btm), color, 2)
+            cv2.putText(frame, label, (l, t - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+
+        # Vẽ banner thông báo kết quả ở trên cùng
+        if now < status_banner_expiry:
+            h, w = frame.shape[:2]
+            banner_bg = (0, 200, 0) # Xanh lá cho check-in/out thành công
+            if "DA CHECK-IN" in status_banner_text:
+                banner_bg = (0, 165, 255) # Màu cam/vàng nếu đã chấm công trước đó
+            elif "CHECK-OUT SAU" in status_banner_text:
+                banner_bg = (0, 0, 220) # Màu đỏ cảnh báo (chờ 5 phút)
+
+            # Banner hình chữ nhật dày 50px ở trên cùng
+            cv2.rectangle(frame, (0, 0), (w, 50), banner_bg, -1)
+
+            # Căn giữa chữ trên banner
+            text_size = cv2.getTextSize(status_banner_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
+            text_x = (w - text_size[0]) // 2
+            text_y = (50 + text_size[1]) // 2
+            cv2.putText(frame, status_banner_text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+        h_f, w_f = frame.shape[:2]
         cv2.putText(frame, "AUTO MODE (>=60s) - press [q] to quit",
-                    (10, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (50, 220, 50), 2)
+                    (10, h_f - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (50, 220, 50), 2)
 
         cv2.imshow("Attendance - FAST (MySQL, chamcong)", frame)
         key = cv2.waitKey(1) & 0xFF

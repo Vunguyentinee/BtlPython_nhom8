@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Secrets / local config
+.env
+
+# Biometric data (raw face photos + face-embedding vectors) — never commit
+dataset/
+encodings/*.pkl
+
+# Runtime artifacts
+reports/
+logs/*.csv
+
+# OS
+Thumbs.db
+.DS_Store

@@ -4,16 +4,7 @@ import sys, pickle
 import numpy as np
 import cv2, dlib, os
 
-# ===== CONFIG =====
-ROOT    = Path(r"E:\BTL_Python")
-DATASET = ROOT / "dataset"
-OUT_PKL = ROOT / "encodings" / "encodings_dlib20.pkl"
-
-# Model paths
-MODELS          = ROOT / "models"
-PREDICTOR_PATH  = MODELS / "shape_predictor_5_face_landmarks.dat"
-RECOG_MODEL_PATH= MODELS / "dlib_face_recognition_resnet_model_v1.dat"
-CNN_PATH        = MODELS / "mmod_human_face_detector.dat"
+from config import ROOT, DATASET, ENCODINGS_PKL as OUT_PKL, MODELS_DIR as MODELS, PREDICTOR_PATH, RECOG_MODEL_PATH, CNN_PATH
 
 # ===== UTILS =====
 def require_file(p: Path, hint: str):
@@ -25,13 +16,9 @@ require_file(PREDICTOR_PATH,  "Đặt shape_predictor_5_face_landmarks.dat vào 
 require_file(RECOG_MODEL_PATH,"Đặt dlib_face_recognition_resnet_model_v1.dat vào models/")
 
 # ===== INIT DLIB =====
-USE_CNN = CNN_PATH.exists()
-if USE_CNN:
-    _cnn = dlib.cnn_face_detection_model_v1(str(CNN_PATH))
-    def detect_rects(rgb): return [d.rect for d in _cnn(rgb, 1)]
-else:
-    _hog = dlib.get_frontal_face_detector()
-    def detect_rects(rgb): return _hog(rgb, 1)
+USE_CNN = False  # Ép buộc dùng HOG trên CPU để tối ưu hóa tốc độ (CNN cực chậm trên CPU)
+_hog = dlib.get_frontal_face_detector()
+def detect_rects(rgb): return _hog(rgb, 0) # Sử dụng upsampling = 0 để tối ưu tốc độ tối đa
 
 PRED = dlib.shape_predictor(str(PREDICTOR_PATH))
 REC  = dlib.face_recognition_model_v1(str(RECOG_MODEL_PATH))
@@ -115,7 +102,10 @@ def sync_encodings():
             print(f"[OK] {person_dir.name}: {ok}/{len(files)} ảnh dùng được")
 
     # Save back
-    arr = np.vstack(new_embeds).astype(np.float32)
+    if not new_embeds:
+        arr = np.empty((0, 128), dtype=np.float32)
+    else:
+        arr = np.vstack(new_embeds).astype(np.float32)
     pickle.dump({"names": new_names, "embeddings": arr}, open(OUT_PKL, "wb"))
 
     print("\n✅ Đã đồng bộ xong!")

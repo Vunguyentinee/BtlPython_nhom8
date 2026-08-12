@@ -3,9 +3,13 @@ import os, sys, pickle, time
 from pathlib import Path
 import numpy as np
 
-# ===== CONFIG CHUNG =====
-ROOT = Path(r"E:\Python_chung")
-ENCODINGS_PKL = ROOT / "encodings" / "encodings_dlib20.pkl"
+from config import ROOT, ENCODINGS_PKL
+from remove_person import (
+    remove_from_encodings,
+    delete_employee_in_db,
+    delete_dataset_folder,
+    ALSO_DELETE_DATASET,
+)
 
 def clear():
     os.system("cls" if os.name == "nt" else "clear")
@@ -28,30 +32,41 @@ def encode_sync():
     pause()
 
 def remove_person():
-    """Xóa 1 người cụ thể khỏi file encodings."""
+    """Xóa 1 người cụ thể khỏi file encodings, Database và Dataset."""
     if not ENCODINGS_PKL.exists():
         print("❌ Không tìm thấy file encodings_dlib20.pkl")
         pause()
         return
-    name = input("👤 Nhập tên người cần xóa: ").strip()
-    if not name:
-        print("⚠️ Tên không hợp lệ.")
+    person = input("👤 Nhập 'Tên_MãNV' hoặc chỉ 'MãNV' cần xoá: ").strip()
+    if not person:
+        print("⚠️ Đầu vào không hợp lệ.")
         pause()
         return
-    data = pickle.load(open(ENCODINGS_PKL, "rb"))
-    names = data["names"]
-    embeddings = data["embeddings"]
 
-    indices = [i for i, n in enumerate(names) if n.lower() != name.lower()]
-    removed = len(names) - len(indices)
+    print("\n⚠️ CẢNH BÁO: Thao tác này sẽ XÓA VĨNH VIỄN và KHÔNG THỂ HOÀN TÁC:")
+    print(f"   - Vector khuôn mặt của '{person}' trong file encodings")
+    print(f"   - Bản ghi nhân viên '{person}' trong DB (kèm toàn bộ lịch sử chấm công)")
+    if ALSO_DELETE_DATASET:
+        print(f"   - Toàn bộ ảnh dataset (raw/processed) của '{person}'")
+    confirm = input(f"\nGõ lại chính xác '{person}' để xác nhận xóa (Enter để hủy): ").strip()
+    if confirm != person:
+        print("❌ Đã hủy thao tác xóa.")
+        pause()
+        return
 
-    if removed == 0:
-        print(f"⚠️ Không tìm thấy '{name}' trong file.")
+    # 1) Xóa khỏi encodings (remove_from_encodings tự xử lý cả 2 dạng: full label và chỉ mã NV)
+    remove_from_encodings(person)
+
+    # 2) Xóa trong DB (bảng nhanvien; chamcong sẽ CASCADE)
+    delete_employee_in_db(person)
+
+    # 3) Xóa thư mục ảnh dataset (chỉ khi được phép qua ALSO_DELETE_DATASET)
+    if ALSO_DELETE_DATASET:
+        delete_dataset_folder(person)
     else:
-        names = [names[i] for i in indices]
-        embeddings = embeddings[indices]
-        pickle.dump({"names": names, "embeddings": embeddings}, open(ENCODINGS_PKL, "wb"))
-        print(f"✅ Đã xóa {removed} vector của '{name}' khỏi file.")
+        print("ℹ️ Bỏ qua xóa thư mục dataset (ALSO_DELETE_DATASET=False).")
+
+    print("🎯 Hoàn tất quá trình xóa nhân viên.")
     pause()
 
 def info_file():
